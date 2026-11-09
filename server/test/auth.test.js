@@ -19,6 +19,7 @@ describe('email + password', () => {
       avatarUrl: null,
       hasPassword: true,
       googleLinked: false,
+      isAdmin: false,
     });
     const cookie = created.headers['set-cookie'][0];
     expect(cookie).toMatch(/^mr_session=/);

@@ -1,14 +1,17 @@
 /**
- * Garmin Health API client (OAuth 1.0a + activity pull and backfill).
- * New activities normally arrive on the push endpoint; backfill asks Garmin to
- * send history, which it delivers the same way.
+ * Garmin Connect Developer Program client (OAuth 2.0 with PKCE).
+ * New activities arrive on the push endpoint. A pull is attempted for recent
+ * uploads; Starter-tier apps are push-only, and a refused pull is empty.
  */
-import { authorizationHeader, oauthParams, signOauth1 } from './oauth1.js';
+import { createHash, randomBytes } from 'node:crypto';
 
-const REQUEST_TOKEN_URL = 'https://connectapi.garmin.com/oauth-service/oauth/request_token';
-const ACCESS_TOKEN_URL = 'https://connectapi.garmin.com/oauth-service/oauth/access_token';
-const AUTHORIZE_URL = 'https://connect.garmin.com/oauthConfirm';
+const AUTHORIZE_URL = 'https://connect.garmin.com/oauth2Confirm';
+const TOKEN_URLS = [
+  'https://diauth.garmin.com/di-oauth2-service/oauth/token',
+  'https://connectapi.garmin.com/di-oauth2-service/oauth/token',
+];
 const API_URL = 'https://apis.garmin.com/wellness-api/rest';
+const PULL_HOSTS = new Set(['apis.garmin.com', 'healthapi.garmin.com']);
 
 const DAY = 24 * 60 * 60;
 const BACKFILL_DAYS = 30;
@@ -20,8 +23,6 @@ export class GarminError extends Error {
     this.status = status;
   }
 }
-
-const form = (text) => Object.fromEntries(new URLSearchParams(text));
 
 const asSummaries = (body) => {
   if (Array.isArray(body)) return body;
@@ -54,6 +55,22 @@ const backfillWindows = (from, to) => {
   return windows;
 };
 
+const accessTokenOf = (token) => token?.token ?? token;
+
+const expiresAtOf = (payload) => {
+  const seconds = Number(payload?.expires_in);
+  const lifetime = Number.isFinite(seconds) && seconds > 0 ? seconds : DAY;
+  return new Date(Date.now() + lifetime * 1000).toISOString();
+};
+
+const userIdOf = (body) => {
+  if (typeof body === 'string' && body.trim()) return body.trim();
+  const id = body?.userId ?? body?.user_id;
+  return id == null || id === '' ? null : String(id);
+};
+
+const refusedPull = (error) => error instanceof GarminError && [403, 404, 412].includes(error.status);
+
 /**
  * @param {{ consumerKey: string, consumerSecret: string }} credentials
  * @param {typeof fetch} [fetchImpl]
@@ -61,93 +78,143 @@ const backfillWindows = (from, to) => {
 export const createGarminClient = ({ consumerKey = '', consumerSecret = '' } = {}, fetchImpl = fetch) => {
   const configured = Boolean(consumerKey && consumerSecret);
 
-  const signed = async (method, url, query, token) => {
-    const { oauth, all } = oauthParams({ consumerKey, token: token?.token, extra: query });
-    oauth.oauth_signature = signOauth1({
-      method,
-      url,
-      params: all,
-      consumerSecret,
-      tokenSecret: token?.secret ?? '',
-    });
-    // Protocol parameters travel in the header; the request query is only the API's own arguments.
-    const requestQuery = {};
-    for (const [key, value] of Object.entries(query)) {
-      if (key.startsWith('oauth_')) oauth[key] = value;
-      else requestQuery[key] = value;
+  const tokenRequest = async (fields) => {
+    let lastError = new GarminError(502, 'Garmin could not be reached');
+    for (const url of TOKEN_URLS) {
+      let response;
+      try {
+        response = await fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Basic ${Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64')}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams(fields),
+        });
+      } catch {
+        continue;
+      }
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok && payload.access_token) return payload;
+      lastError = new GarminError(response.status, 'Garmin rejected the token request');
+      if (response.status !== 404 && response.status !== 405) throw lastError;
     }
-    const qs = new URLSearchParams(Object.entries(requestQuery).map(([key, value]) => [key, String(value)])).toString();
+    throw lastError;
+  };
+
+  const bearer = async (method, url, accessToken, query = null) => {
+    const qs = query
+      ? new URLSearchParams(Object.entries(query).map(([key, value]) => [key, String(value)])).toString()
+      : '';
     const response = await fetchImpl(qs ? `${url}?${qs}` : url, {
       method,
-      headers: { Authorization: authorizationHeader(oauth), Accept: 'application/json' },
+      headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}` },
     });
     const text = await response.text();
     if (response.status === 409) return null;
-    if (!response.ok) {
-      throw new GarminError(response.status, `Garmin request failed (${response.status})`);
-    }
+    if (!response.ok) throw new GarminError(response.status, `Garmin request failed (${response.status})`);
     if (!text) return null;
-    const json = response.headers.get('content-type')?.includes('json');
-    return json ? JSON.parse(text) : form(text);
+    return response.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text;
   };
 
   return {
     configured,
 
-    async beginConnect(callbackUrl) {
-      const body = await signed('POST', REQUEST_TOKEN_URL, { oauth_callback: callbackUrl });
-      if (!body?.oauth_token || !body?.oauth_token_secret) throw new GarminError(502, 'Garmin did not return a request token');
+    beginConnect(callbackUrl) {
+      const state = randomBytes(32).toString('base64url');
+      const codeVerifier = randomBytes(32).toString('base64url');
+      const params = new URLSearchParams({
+        client_id: consumerKey,
+        code_challenge: createHash('sha256').update(codeVerifier).digest('base64url'),
+        code_challenge_method: 'S256',
+        redirect_uri: callbackUrl,
+        response_type: 'code',
+        state,
+      });
       return {
-        requestToken: body.oauth_token,
-        requestSecret: body.oauth_token_secret,
-        authorizeUrl: `${AUTHORIZE_URL}?oauth_token=${encodeURIComponent(body.oauth_token)}`,
+        requestToken: state,
+        requestSecret: codeVerifier,
+        authorizeUrl: `${AUTHORIZE_URL}?${params}`,
       };
     },
 
-    async finishConnect({ requestToken, requestSecret, verifier }) {
-      const body = await signed('POST', ACCESS_TOKEN_URL, { oauth_verifier: verifier }, { token: requestToken, secret: requestSecret });
-      if (!body?.oauth_token || !body?.oauth_token_secret) throw new GarminError(502, 'Garmin did not return an access token');
-      return { token: body.oauth_token, secret: body.oauth_token_secret };
+    async finishConnect({ code, codeVerifier, redirectUri }) {
+      const payload = await tokenRequest({
+        client_id: consumerKey,
+        client_secret: consumerSecret,
+        code,
+        code_verifier: codeVerifier,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri,
+      });
+      const externalUserId = userIdOf(await bearer('GET', `${API_URL}/user/id`, payload.access_token));
+      if (!externalUserId) throw new GarminError(502, 'Garmin did not return a user id');
+      return {
+        token: payload.access_token,
+        secret: payload.refresh_token,
+        expiresAt: expiresAtOf(payload),
+        externalUserId,
+      };
+    },
+
+    async refresh(row) {
+      const payload = await tokenRequest({
+        client_id: consumerKey,
+        client_secret: consumerSecret,
+        grant_type: 'refresh_token',
+        refresh_token: row.token_secret,
+      });
+      return {
+        token: payload.access_token,
+        secret: payload.refresh_token || row.token_secret,
+        expiresAt: expiresAtOf(payload),
+        externalUserId: row.external_id ?? null,
+      };
     },
 
     /**
-     * Recent uploads (last 24h, the API's maximum window) plus a backfill request
-     * when a history range is given. Backfill is delivered later to the push endpoint.
+     * Recent uploads, when the app is allowed to pull them, plus a backfill
+     * request for a history range. Backfill is delivered later to the push endpoint.
+     * A push-only app responds 403 or 404; that is an empty pull, not a failure.
      */
     async fetchActivities(token, { from, to, since } = {}) {
-      const credentials = { token: token.token, secret: token.secret ?? token.token_secret };
+      const accessToken = accessTokenOf(token);
       if (from && to) {
         for (const [summaryStartTimeInSeconds, summaryEndTimeInSeconds] of backfillWindows(from, to)) {
-          await signed(
-            'GET',
-            `${API_URL}/backfill/activities`,
-            { summaryStartTimeInSeconds, summaryEndTimeInSeconds },
-            credentials,
-          );
+          try {
+            await bearer('GET', `${API_URL}/backfill/activities`, accessToken, { summaryStartTimeInSeconds, summaryEndTimeInSeconds });
+          } catch (error) {
+            if (refusedPull(error)) break;
+            throw error;
+          }
         }
       }
       const end = Math.floor(Date.now() / 1000);
       const sinceSec = since ? Math.floor(Date.parse(since) / 1000) : end - DAY;
       const uploadStartTimeInSeconds = Math.max(end - DAY, Number.isFinite(sinceSec) ? sinceSec : end - DAY);
-      const pulled = await signed('GET', `${API_URL}/activities`, { uploadStartTimeInSeconds, uploadEndTimeInSeconds: end }, credentials);
-      return asSummaries(pulled).map(publicSummary).filter(Boolean);
+      try {
+        const pulled = await bearer('GET', `${API_URL}/activities`, accessToken, { uploadStartTimeInSeconds, uploadEndTimeInSeconds: end });
+        return asSummaries(pulled).map(publicSummary).filter(Boolean);
+      } catch (error) {
+        if (refusedPull(error)) return [];
+        throw error;
+      }
     },
 
     /** Fetches a ping notification's callback, which must stay on Garmin's API host. */
     async pullUrl(token, callbackUrl) {
       const url = new URL(callbackUrl);
-      if (url.protocol !== 'https:' || !['apis.garmin.com', 'healthapi.garmin.com'].includes(url.hostname)) {
+      if (url.protocol !== 'https:' || !PULL_HOSTS.has(url.hostname)) {
         throw new GarminError(400, 'Unexpected Garmin callback');
       }
-      const credentials = { token: token.token, secret: token.secret ?? token.token_secret };
-      const pulled = await signed('GET', `${url.origin}${url.pathname}`, Object.fromEntries(url.searchParams), credentials);
+      const pulled = await bearer('GET', url.toString(), accessTokenOf(token));
       return asSummaries(pulled).map(publicSummary).filter(Boolean);
     },
 
     async deregister(token) {
-      const credentials = { token: token.token, secret: token.secret ?? token.token_secret };
       try {
-        await signed('DELETE', `${API_URL}/user/registration`, {}, credentials);
+        await bearer('DELETE', `${API_URL}/user/registration`, accessTokenOf(token));
       } catch (error) {
         if (error?.status !== 401 && error?.status !== 404) throw error;
       }

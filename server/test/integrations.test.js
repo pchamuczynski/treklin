@@ -11,9 +11,9 @@ const garmin = {
     requestToken: 'req',
     requestSecret: 'sec',
   }),
-  finishConnect: async ({ verifier }) => {
-    if (verifier !== 'ok') throw Object.assign(new Error('denied'), { status: 400 });
-    return { token: 'access', secret: 'access-secret' };
+  finishConnect: async ({ code }) => {
+    if (code !== 'ok') throw Object.assign(new Error('denied'), { status: 400 });
+    return { token: 'access', secret: 'access-secret', externalUserId: 'garmin-user' };
   },
   fetchActivities: async () => [
     {
@@ -39,7 +39,7 @@ describe('Garmin integration', () => {
     expect(connect.status).toBe(302);
     expect(connect.headers.location).toBe('https://connect.garmin.com/oauthConfirm?oauth_token=req');
 
-    const callback = await c.get('/api/integrations/garmin/callback?oauth_token=req&oauth_verifier=ok');
+    const callback = await c.get('/api/integrations/garmin/callback?code=ok&state=req');
     expect(callback.status).toBe(302);
     expect(callback.headers.location).toContain('garmin=connected');
     expect((await c.get('/api/integrations')).body.connected).toEqual(['garmin']);
@@ -54,7 +54,7 @@ describe('Garmin integration', () => {
       .send({
         activities: [
           {
-            userAccessToken: 'access',
+            userId: 'garmin-user',
             activityId: 99,
             activityType: 'CYCLING',
             distanceInMeters: 1000,
@@ -70,7 +70,7 @@ describe('Garmin integration', () => {
     expect((await c.del('/api/integrations/garmin')).status).toBe(204);
     expect((await c.get('/api/integrations')).body.connected).toEqual([]);
     expect((await request(app).post('/api/integrations/garmin/push').send({
-      activities: [{ userAccessToken: 'access', activityId: 100, activityType: 'RUNNING', distanceInMeters: 1, startTimeInSeconds: 1740002000 }],
+      activities: [{ userId: 'garmin-user', activityId: 100, activityType: 'RUNNING', distanceInMeters: 1, startTimeInSeconds: 1740002000 }],
     })).status).toBe(200);
     expect((await c.get('/api/integrations/garmin/activities?since=2020-01-01T00:00:00.000Z')).status).toBe(404);
   });

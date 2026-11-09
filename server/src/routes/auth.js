@@ -10,7 +10,7 @@ import { requireUser } from '../middleware/session.js';
 import { toPublicUser } from '../repositories/users.js';
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, hashPassword, verifyPassword } from '../security/passwords.js';
 
-const email = z
+export const emailField = z
   .string({ error: 'Enter your email address' })
   .trim()
   .toLowerCase()
@@ -22,7 +22,7 @@ const password = z
   .min(PASSWORD_MIN_LENGTH, `Password must be at least ${PASSWORD_MIN_LENGTH} characters`)
   .max(PASSWORD_MAX_LENGTH, `Password must be at most ${PASSWORD_MAX_LENGTH} characters`);
 
-const cleanName = (value) =>
+export const cleanName = (value) =>
   String(value ?? '')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, '')
@@ -30,8 +30,11 @@ const cleanName = (value) =>
     .trim()
     .slice(0, 60);
 
-const registerBody = z.object({ email, password, name: z.string().max(200).optional() });
-const loginBody = z.object({ email, password: z.string({ error: 'Enter your password' }).min(1).max(PASSWORD_MAX_LENGTH) });
+const registerBody = z.object({ email: emailField, password, name: z.string().max(200).optional() });
+const loginBody = z.object({
+  email: emailField,
+  password: z.string({ error: 'Enter your password' }).min(1).max(PASSWORD_MAX_LENGTH),
+});
 const googleBody = z.object({ credential: z.string().min(1).max(4096) });
 
 const INVALID_CREDENTIALS = 'Invalid email or password';

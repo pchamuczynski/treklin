@@ -78,6 +78,15 @@ const MIGRATIONS = [
     PRIMARY KEY (user_id, external_id)
   );
   `,
+  // 4: Garmin Connect user id, used to match OAuth 2 push notifications
+  `
+  ALTER TABLE integrations ADD COLUMN external_id TEXT;
+  CREATE INDEX integrations_external_id ON integrations(provider, external_id);
+  `,
+  // 5: accounts allowed to open the admin panel. ADMIN_EMAILS is applied at startup.
+  `
+  ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /** Runs `fn` atomically; rolls back if it throws. */

@@ -51,6 +51,11 @@ Not included yet: email verification and password reset (they need an email-send
 Google sign-in with the same email takes over an existing password account and removes its password - see
 Security.
 
+**Admin panel.** Set `ADMIN_EMAILS` in `server/.env` to a comma-separated list of account emails, then restart
+the API. Those accounts can open `/admin` to browse accounts and routes, edit a name, email or verification
+flag, replace someone's routes, and sign them out everywhere. Password hashes and Strava/Garmin tokens are
+not shown. The account menu shows an Admin link only for those accounts.
+
 ### Production
 
 Build the frontend and let the API serve it from the same origin (first-party cookies, no CORS):

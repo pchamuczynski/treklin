@@ -114,6 +114,11 @@ const AccountMenu = ({ onManageIntegration, connectionVersion = 0 }) => {
                 </div>
               </div>
             </div>
+            {user.isAdmin && (
+              <a className="menu-item" role="menuitem" href="/admin">
+                Admin
+              </a>
+            )}
             <button type="button" className="menu-item" role="menuitem" onClick={handleLogOut}>
               Log out
             </button>

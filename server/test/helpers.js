@@ -30,6 +30,7 @@ export const createTestServer = ({ googleEnabled = true, env = {}, garmin, strav
       get: (path) => agent.get(path),
       post: (path, body) => withHeaders(agent.post(path)).send(body),
       put: (path, body) => withHeaders(agent.put(path)).send(body),
+      patch: (path, body) => withHeaders(agent.patch(path)).send(body),
       del: (path) => withHeaders(agent.delete(path)),
       raw: agent,
     };

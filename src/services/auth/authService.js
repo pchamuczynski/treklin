@@ -7,7 +7,7 @@
  *
  * @typedef {{
  *   id: string, name: string, email?: string, avatarUrl?: string | null,
- *   hasPassword?: boolean, googleLinked?: boolean, isGuest: boolean,
+ *   hasPassword?: boolean, googleLinked?: boolean, isAdmin?: boolean, isGuest: boolean,
  * }} User
  */
 import { config } from '../../config/env';

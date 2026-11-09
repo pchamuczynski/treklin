@@ -26,6 +26,31 @@ const summariesOf = (body) => {
   return Array.isArray(body?.activities) ? body.activities : [];
 };
 
+const garminOwner = (repo, item) => {
+  if (item?.userId != null && item.userId !== '') {
+    const byUser = repo.findByExternalId('garmin', item.userId);
+    if (byUser) return byUser;
+  }
+  return item?.userAccessToken ? repo.findByToken('garmin', item.userAccessToken) : null;
+};
+
+const freshGarminRow = async (garmin, repo, row) => {
+  if (!garmin.refresh || garmin.personal) return row;
+  const expires = Date.parse(row.expires_at ?? '');
+  if (Number.isFinite(expires) && expires - Date.now() > 120_000) return row;
+  try {
+    const next = await garmin.refresh(row);
+    repo.save(row.user_id, 'garmin', next.token, next.secret, next.expiresAt ?? null, next.externalUserId ?? row.external_id ?? null);
+    return repo.get(row.user_id, 'garmin');
+  } catch (error) {
+    if (error?.status === 400 || error?.status === 401) {
+      repo.remove(row.user_id, 'garmin');
+      throw new HttpError(401, 'Reconnect Garmin');
+    }
+    throw error;
+  }
+};
+
 export const createGarminPushHandler = ({ db, garmin }) => {
   const repo = createIntegrationRepository(db);
 
@@ -34,7 +59,7 @@ export const createGarminPushHandler = ({ db, garmin }) => {
       const body = req.body ?? {};
       const deregistrations = Array.isArray(body.deregistrations) ? body.deregistrations : [];
       for (const item of deregistrations) {
-        const row = item?.userAccessToken ? repo.findByToken('garmin', item.userAccessToken) : null;
+        const row = garminOwner(repo, item);
         if (row) repo.remove(row.user_id, 'garmin');
       }
 
@@ -42,7 +67,7 @@ export const createGarminPushHandler = ({ db, garmin }) => {
       const direct = new Map();
       for (const item of items) {
         if (item?.callbackURL && !item.activityType && item.activityId == null && item.summaryId == null) continue;
-        const row = item?.userAccessToken ? repo.findByToken('garmin', item.userAccessToken) : null;
+        const row = garminOwner(repo, item);
         if (!row) continue;
         const list = direct.get(row.user_id) ?? [];
         list.push(item);
@@ -51,11 +76,17 @@ export const createGarminPushHandler = ({ db, garmin }) => {
       for (const [userId, summaries] of direct) repo.saveActivities(userId, summaries);
 
       for (const item of items) {
-        if (!item?.callbackURL) continue;
-        const row = item.userAccessToken ? repo.findByToken('garmin', item.userAccessToken) : null;
+        if (!item?.callbackURL || !garmin.pullUrl) continue;
+        let row = garminOwner(repo, item);
         if (!row) continue;
-        const summaries = await garmin.pullUrl(row, item.callbackURL);
-        repo.saveActivities(row.user_id, summaries);
+        try {
+          row = await freshGarminRow(garmin, repo, row);
+          const summaries = await garmin.pullUrl(row, item.callbackURL);
+          repo.saveActivities(row.user_id, summaries);
+        } catch (error) {
+          if (error instanceof HttpError && error.status === 401) continue;
+          throw error;
+        }
       }
 
       res.status(200).json({ ok: true });
@@ -108,15 +139,19 @@ export const createIntegrationRouter = ({ config, db, garmin, strava }) => {
   });
 
   router.get('/garmin/callback', async (req, res) => {
-    const token = one(req.query.oauth_token);
-    const verifier = one(req.query.oauth_verifier);
-    const pending = token ? repo.takeRequest(token) : null;
-    if (!pending || pending.provider !== 'garmin' || !verifier) {
+    const code = one(req.query.code);
+    const state = one(req.query.state);
+    const pending = state ? repo.takeRequest(state) : null;
+    if (!pending || pending.provider !== 'garmin' || !code) {
       return res.redirect(home(config, { garmin: 'error', reason: 'Garmin connection was cancelled' }));
     }
     try {
-      const access = await garmin.finishConnect({ requestToken: token, requestSecret: pending.token_secret, verifier });
-      repo.save(pending.user_id, 'garmin', access.token, access.secret);
+      const access = await garmin.finishConnect({
+        code,
+        codeVerifier: pending.token_secret,
+        redirectUri: `${config.appOrigins[0]}/api/integrations/garmin/callback`,
+      });
+      repo.save(pending.user_id, 'garmin', access.token, access.secret, access.expiresAt ?? null, access.externalUserId ?? null);
       res.redirect(home(config, { garmin: 'connected' }));
     } catch {
       res.redirect(home(config, { garmin: 'error', reason: 'Garmin could not finish the connection' }));
@@ -149,6 +184,7 @@ export const createIntegrationRouter = ({ config, db, garmin, strava }) => {
         row = repo.get(req.user.id, 'garmin');
       }
       if (!row) throw new HttpError(404, 'Garmin is not connected');
+      row = await freshGarminRow(garmin, repo, row);
 
       const from = one(req.query.from);
       const to = one(req.query.to);

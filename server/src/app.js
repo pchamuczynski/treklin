@@ -12,9 +12,10 @@ import { createGarminClient } from './integrations/garmin.js';
 import { createPersonalGarminClient } from './integrations/garminPersonal.js';
 import { createStravaClient } from './integrations/strava.js';
 import { errorHandler, notFound } from './middleware/errors.js';
-import { loadSession, requireUser } from './middleware/session.js';
+import { loadSession, requireAdmin, requireUser } from './middleware/session.js';
 import { createRouteSetRepository } from './repositories/routeSets.js';
 import { createUserRepository } from './repositories/users.js';
+import { createAdminRouter } from './routes/admin.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createGarminPushHandler, createIntegrationRouter } from './routes/integrations.js';
 import { createRouteSetRouter } from './routes/routeSets.js';
@@ -33,7 +34,8 @@ export const createApp = ({
   garmin = garminFromConfig(config.garmin),
   strava = createStravaClient(config.strava),
 }) => {
-  const users = createUserRepository(db);
+  const users = createUserRepository(db, { adminEmails: config.adminEmails });
+  users.syncAdmins();
   const sessions = createSessionStore(db, { ttlMs: config.sessionTtlMs });
   const routeSets = createRouteSetRepository(db);
 
@@ -67,6 +69,7 @@ export const createApp = ({
   api.use(csrfProtection(config.appOrigins));
   api.use(loadSession({ sessions, cookieName: config.cookie.name }));
   api.use('/auth', express.json({ limit: '10kb' }), createAuthRouter({ users, sessions, db, config, verifyGoogleCredential }));
+  api.use('/admin', requireAdmin, express.json({ limit: '10mb' }), createAdminRouter({ users, routeSets, sessions, db }));
   api.use('/routes', requireUser, express.json({ limit: '10mb' }), createRouteSetRouter({ routeSets }));
   api.use('/integrations', createIntegrationRouter({ config, db, garmin, strava }));
   api.use(notFound);

@@ -79,6 +79,11 @@
   position: relative;
 }
 
+a.menu-item {
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
 .menu-item {
   display: flex;
   align-items: center;

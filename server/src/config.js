@@ -34,6 +34,8 @@ const schema = z.object({
   // Authorization Callback Domain is the host of APP_ORIGIN (treklin.com, or localhost for local testing).
   STRAVA_CLIENT_ID: z.string().trim().default(''),
   STRAVA_CLIENT_SECRET: z.string().trim().default(''),
+  // Comma-separated account emails that may open /admin. Empty disables the panel.
+  ADMIN_EMAILS: z.string().default(''),
 });
 
 export const loadConfig = (env = process.env) => {
@@ -44,6 +46,7 @@ export const loadConfig = (env = process.env) => {
   }
   const values = parsed.data;
   const isProduction = values.NODE_ENV === 'production';
+  const adminEmails = parseAdminEmails(values.ADMIN_EMAILS);
 
   return Object.freeze({
     env: values.NODE_ENV,
@@ -70,5 +73,16 @@ export const loadConfig = (env = process.env) => {
     }),
     // Auth attempts per IP per 15 minutes (relaxed only for automated tests).
     authRateLimit: values.NODE_ENV === 'test' ? 1000 : 20,
+    adminEmails,
   });
+};
+
+/** Lowercased, de-duplicated account emails. Invalid entries fail startup. */
+const parseAdminEmails = (value) => {
+  const emails = [...new Set(value.split(',').map((part) => part.trim().toLowerCase()).filter(Boolean))];
+  const invalid = emails.filter((item) => !z.email().safeParse(item).success);
+  if (invalid.length > 0) {
+    throw new Error(`Invalid server configuration - ADMIN_EMAILS: ${invalid.join(', ')}`);
+  }
+  return Object.freeze(emails);
 };

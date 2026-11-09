@@ -23,13 +23,15 @@ export const createIntegrationRepository = (db) => {
   const listByUser = db.prepare('SELECT provider FROM integrations WHERE user_id = ? ORDER BY provider');
   const byUserProvider = db.prepare('SELECT * FROM integrations WHERE user_id = ? AND provider = ?');
   const byToken = db.prepare('SELECT * FROM integrations WHERE provider = ? AND token = ?');
+  const byExternalId = db.prepare('SELECT * FROM integrations WHERE provider = ? AND external_id = ?');
   const upsert = db.prepare(`
-    INSERT INTO integrations (user_id, provider, token, token_secret, expires_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO integrations (user_id, provider, token, token_secret, expires_at, external_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id, provider) DO UPDATE SET
       token = excluded.token,
       token_secret = excluded.token_secret,
       expires_at = excluded.expires_at,
+      external_id = COALESCE(excluded.external_id, integrations.external_id),
       updated_at = excluded.updated_at
   `);
   const removeRow = db.prepare('DELETE FROM integrations WHERE user_id = ? AND provider = ?');
@@ -84,9 +86,14 @@ export const createIntegrationRepository = (db) => {
       return byToken.get(provider, token) ?? null;
     },
 
-    save(userId, provider, token, tokenSecret, expiresAt = null) {
+    findByExternalId(provider, externalId) {
+      if (externalId == null || externalId === '') return null;
+      return byExternalId.get(provider, String(externalId)) ?? null;
+    },
+
+    save(userId, provider, token, tokenSecret, expiresAt = null, externalId = null) {
       const now = new Date().toISOString();
-      upsert.run(userId, provider, token, tokenSecret, expiresAt, now, now);
+      upsert.run(userId, provider, token, tokenSecret, expiresAt, externalId, now, now);
     },
 
     remove(userId, provider) {
