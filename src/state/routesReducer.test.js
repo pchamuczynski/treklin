@@ -32,7 +32,36 @@ describe('routesReducer', () => {
 
     state = routesReducer(state, { type: 'WORKOUTS_DELETED', routeId: route.id, workoutIds: [w2.id] });
     expect(state.routes[0].workouts).toEqual([]);
+    expect(state.routes[0].autoImport.excluded).toEqual([]);
     expect(state.revision).toBe(4);
+  });
+
+  it('keeps a deleted import off the route when the same recording syncs again', () => {
+    const route = createRoute(
+      { name: 'Auto', from: 'A', to: 'B', activities: ['Running'], autoImport: { enabled: true, activities: ['Running'] } },
+      geometry,
+      new Date('2025-01-01T00:00:00Z'),
+    );
+    const workout = createWorkout({
+      date: '2025-01-02',
+      activity: 'Running',
+      distance: 1000,
+      source: 'strava',
+      externalId: '42',
+      startedAt: '2025-01-02T08:00:00.000Z',
+    });
+
+    let state = ready([route]);
+    state = routesReducer(state, { type: 'WORKOUTS_IMPORTED', workouts: [workout] });
+    const importedId = state.routes[0].workouts[0].id;
+    state = routesReducer(state, { type: 'WORKOUT_DELETED', routeId: route.id, workoutId: importedId });
+
+    expect(state.routes[0].workouts).toEqual([]);
+    expect(state.routes[0].autoImport.excluded).toEqual(['strava:42']);
+
+    const saved = state;
+    state = routesReducer(state, { type: 'WORKOUTS_IMPORTED', workouts: [{ ...workout, id: 'again' }] });
+    expect(state).toBe(saved);
   });
 
   it('keeps workouts sorted by date', () => {

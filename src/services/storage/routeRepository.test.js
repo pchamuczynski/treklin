@@ -24,7 +24,13 @@ const route = {
   distance: 1,
   duration: 1,
   provider: 'osrm',
-  autoImport: { enabled: true, activities: ['Cycling'], sources: ['strava', 'garmin'], since: '2025-01-01T10:00:00.000Z' },
+  autoImport: {
+    enabled: true,
+    activities: ['Cycling'],
+    sources: ['strava', 'garmin'],
+    since: '2025-01-01T10:00:00.000Z',
+    excluded: [],
+  },
   workouts: [],
   createdAt: '2025-01-01T00:00:00.000Z',
 };

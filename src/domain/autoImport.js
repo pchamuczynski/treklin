@@ -7,6 +7,8 @@
  *    older ones. Switching it off and on again starts a new window.
  *  - A completed route (covered distance >= route distance) imports nothing more;
  *    the workout that crosses the finish line is the last one.
+ *  - A workout the user removed from the route stays off it. Automatic sync does not
+ *    put that recording back. Choosing it again in a manual import does.
  *
  * @typedef {object} AutoImportSettings
  * @property {boolean} enabled
@@ -14,10 +16,11 @@
  *                                    Kept while disabled so re-enabling restores the choice.
  * @property {string[]} sources       Connected services to import from (`strava`, `garmin`). Empty while off.
  * @property {string | null} since    ISO timestamp of when auto-import was switched on; null while off.
+ * @property {string[]} excluded      `source:externalId` keys the user removed from this route.
  */
 import { ACTIVITIES, normalizeActivities } from './activities.js';
 import { intervalsOverlap, workoutInterval } from './overlap.js';
-import { mergeImportedWorkouts, sortWorkoutsByDate, totalDistance } from './workout.js';
+import { externalKey, mergeImportedWorkouts, sortWorkoutsByDate, totalDistance } from './workout.js';
 
 /** Services a route can import workouts from, in display order. */
 export const IMPORT_SOURCES = Object.freeze([
@@ -29,7 +32,46 @@ export const IMPORT_SOURCE_IDS = IMPORT_SOURCES.map((source) => source.id);
 
 export const importSourceLabel = (id) => IMPORT_SOURCES.find((source) => source.id === id)?.label ?? id;
 
-export const DEFAULT_AUTO_IMPORT = Object.freeze({ enabled: false, activities: [], sources: [], since: null });
+export const DEFAULT_AUTO_IMPORT = Object.freeze({ enabled: false, activities: [], sources: [], since: null, excluded: [] });
+
+const MAX_EXCLUDED = 1000;
+
+/** Keeps `source:externalId` keys for recordings the user removed from a route. */
+const normalizeExcluded = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const keys = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const split = item.indexOf(':');
+    const source = split === -1 ? '' : item.slice(0, split);
+    const id = split === -1 ? '' : item.slice(split + 1);
+    if (!IMPORT_SOURCE_IDS.includes(source) || id.length === 0 || id.length > 64 || seen.has(item)) continue;
+    seen.add(item);
+    keys.push(item);
+  }
+  return keys.length > MAX_EXCLUDED ? keys.slice(keys.length - MAX_EXCLUDED) : keys;
+};
+
+/**
+ * Remembers imported workouts the user deleted, so the next sync does not add them again.
+ * A route with nothing new to remember is returned unchanged.
+ */
+export const dismissWorkouts = (route, removed) => {
+  const excluded = normalizeExcluded([...(route.autoImport?.excluded ?? []), ...removed.map(externalKey).filter(Boolean)]);
+  const current = route.autoImport?.excluded ?? [];
+  if (excluded.length === current.length && excluded.every((key, index) => key === current[index])) return route;
+  return { ...route, autoImport: { ...route.autoImport, excluded } };
+};
+
+/** Forgets a dismissal when the user explicitly imports that recording again. */
+export const releaseDismissed = (route, workouts) => {
+  const drop = new Set(workouts.map(externalKey).filter(Boolean));
+  if (drop.size === 0) return route;
+  const excluded = (route.autoImport?.excluded ?? []).filter((key) => !drop.has(key));
+  if (excluded.length === (route.autoImport?.excluded?.length ?? 0)) return route;
+  return { ...route, autoImport: { ...route.autoImport, excluded } };
+};
 
 /**
  * @param {unknown} rawSources
@@ -57,7 +99,13 @@ export const normalizeAutoImport = (raw, allowed = ACTIVITIES) => {
   const since = toIsoTimestamp(raw?.since);
   const sources = normalizeSources(raw?.sources, raw?.enabled === true);
   const enabled = sources.length > 0 && since !== null && activities.length > 0;
-  return { enabled, activities, sources: enabled ? sources : [], since: enabled ? since : null };
+  return {
+    enabled,
+    activities,
+    sources: enabled ? sources : [],
+    since: enabled ? since : null,
+    excluded: normalizeExcluded(raw?.excluded),
+  };
 };
 
 /**
@@ -73,9 +121,10 @@ export const resolveAutoImport = (previous, requested, now, allowed = ACTIVITIES
   const activities = allowedOnly(requested?.activities, allowed);
   const sources = normalizeSources(requested?.sources, requested?.sources == null && requested?.enabled === true);
   const enabled = sources.length > 0 && activities.length > 0;
-  if (!enabled) return { enabled: false, activities, sources: [], since: null };
+  const excluded = normalizeExcluded(previous?.excluded);
+  if (!enabled) return { enabled: false, activities, sources: [], since: null, excluded };
   const wasEnabled = previous?.enabled === true && previous.since !== null;
-  return { enabled: true, activities, sources, since: wasEnabled ? previous.since : now.toISOString() };
+  return { enabled: true, activities, sources, since: wasEnabled ? previous.since : now.toISOString(), excluded };
 };
 
 export const validateAutoImport = (settings) => {
@@ -114,11 +163,13 @@ export const isAutoImportActive = (route) => route.autoImport?.enabled === true 
 const recordedAfter = (workout, since) =>
   workout.startedAt ? workout.startedAt >= since : workout.date > since.slice(0, 10);
 
-export const routeAcceptsWorkout = (route, workout) =>
-  isAutoImportActive(route) &&
-  route.autoImport.sources.includes(workout.source) &&
-  route.autoImport.activities.includes(workout.activity) &&
-  recordedAfter(workout, route.autoImport.since);
+export const routeAcceptsWorkout = (route, workout) => {
+  if (!isAutoImportActive(route)) return false;
+  if (!route.autoImport.sources.includes(workout.source) || !route.autoImport.activities.includes(workout.activity)) return false;
+  if (!recordedAfter(workout, route.autoImport.since)) return false;
+  const key = externalKey(workout);
+  return !key || !route.autoImport.excluded.includes(key);
+};
 
 const chronological = (a, b) =>
   (a.startedAt ?? a.date).localeCompare(b.startedAt ?? b.date) || a.createdAt.localeCompare(b.createdAt);
@@ -193,7 +244,7 @@ const acceptUntilComplete = (route, eligible, policy = 'both') => {
  * Adds each imported workout to every route whose auto-import settings accept it.
  * Workouts are applied in the order they happened and a route stops accepting them
  * once it is completed. Already imported workouts (same source + externalId) are
- * skipped, so syncing is idempotent. Unchanged routes keep their identity.
+ * skipped, and so are recordings the user removed from that route. Unchanged routes keep their identity.
  *
  * @param {'old' | 'new' | 'both'} [policy]
  * @returns {{ routes: import('./route').Route[], addedCount: number, filledCount: number, overlapCount: number, removedCount: number }}
@@ -235,7 +286,7 @@ export const assignWorkoutsToRoutes = (routes, workouts, routeIds, policy = 'bot
     if (!selected.has(route.id)) return route;
     const eligible = workouts.filter((workout) => route.activities.includes(workout.activity));
     if (eligible.length === 0) return route;
-    const result = acceptUntilComplete(route, eligible, policy);
+    const result = acceptUntilComplete(releaseDismissed(route, eligible), eligible, policy);
     addedCount += result.added;
     filledCount += result.filled;
     overlapCount += result.overlaps;

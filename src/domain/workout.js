@@ -102,7 +102,7 @@ export const latestWorkout = (workouts) => {
   return latest;
 };
 
-const externalKey = (workout) =>
+export const externalKey = (workout) =>
   workout.externalId == null ? null : `${workout.source}:${workout.externalId}`;
 
 /**

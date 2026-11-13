@@ -2,7 +2,7 @@
  * Pure reducer for route/workout state. Every mutation goes through here, so each
  * user action produces exactly one consistent state update (and one save).
  */
-import { IMPORT_SOURCE_IDS, assignWorkoutsToRoutes, distributeImportedWorkouts } from '../domain/autoImport';
+import { IMPORT_SOURCE_IDS, assignWorkoutsToRoutes, dismissWorkouts, distributeImportedWorkouts } from '../domain/autoImport';
 import { updateRoute, withWorkouts } from '../domain/route';
 
 export const initialRoutesState = Object.freeze({
@@ -65,20 +65,22 @@ export const routesReducer = (state, action) => {
         ),
       );
     case 'WORKOUT_DELETED':
-      return updateRouteById(state, action.routeId, (route) =>
-        withWorkouts(
-          route,
+      return updateRouteById(state, action.routeId, (route) => {
+        const removed = route.workouts.filter((w) => w.id === action.workoutId);
+        return withWorkouts(
+          dismissWorkouts(route, removed),
           route.workouts.filter((w) => w.id !== action.workoutId),
-        ),
-      );
+        );
+      });
     case 'WORKOUTS_DELETED': {
       const ids = new Set(action.workoutIds);
-      return updateRouteById(state, action.routeId, (route) =>
-        withWorkouts(
-          route,
+      return updateRouteById(state, action.routeId, (route) => {
+        const removed = route.workouts.filter((w) => ids.has(w.id));
+        return withWorkouts(
+          dismissWorkouts(route, removed),
           route.workouts.filter((w) => !ids.has(w.id)),
-        ),
-      );
+        );
+      });
     }
     case 'WORKOUTS_IMPORTED':
       return replaceIfChanged(state, distributeImportedWorkouts(state.routes, action.workouts, action.policy).routes);

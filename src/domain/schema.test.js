@@ -27,7 +27,7 @@ describe('sanitizeRoutes', () => {
     expect(route.id).toBe('1718800000000');
     expect(route.createdAt).toBe('2025-06-19T10:00:00.000Z');
     expect(route).not.toHaveProperty('coveredDistance');
-    expect(route.autoImport).toEqual({ enabled: false, activities: [], sources: [], since: null });
+    expect(route.autoImport).toEqual({ enabled: false, activities: [], sources: [], since: null, excluded: [] });
     expect(route.workouts[0]).toMatchObject({ source: 'manual', externalId: null, createdAt: '2025-06-19T10:00:00.000Z' });
   });
 
